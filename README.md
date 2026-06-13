@@ -50,6 +50,15 @@ encode({"a": 1, "b": [1, 2]})   # => "a = 1\nb = [1, 2]\n"
 - **No host panics.** Decode and encode recover panics into errors.
 - **Deterministic order.** Table keys are emitted in sorted order.
 
+## Notes
+
+TOML has **no anchors, aliases, or merge keys** — unlike YAML, it has no
+cross-reference mechanism; every value is written explicitly (this is by design
+in the TOML spec). To reuse configuration across sections, decode the document
+and compose the resulting dicts in your Starlark script. Nested tables
+(`[a.b]`), dotted keys (`a.b = 1`), inline tables (`{ x = 1 }`), and arrays of
+tables (`[[items]]`) are all supported.
+
 ## Configuration
 
 | Option | Type | Default | Description |
