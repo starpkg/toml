@@ -1,0 +1,20 @@
+name: Scorecard
+
+on:
+  branch_protection_rule:
+  schedule:
+    - cron: '27 4 * * 1'
+  push:
+    branches: ["master"]
+  workflow_dispatch:
+
+permissions: read-all
+
+jobs:
+  scorecard:
+    # Reusable Scorecard analysis lives in 1set/meta. Pinned to a commit SHA.
+    permissions:
+      security-events: write
+      id-token: write
+      contents: read
+    uses: 1set/meta/.github/workflows/scorecard.yml@73f7d228a0b12d376b85687209d2124602f66c4e
