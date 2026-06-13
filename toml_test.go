@@ -203,3 +203,82 @@ func TestToStarlarkUnsupported(t *testing.T) {
 		t.Errorf("expected unsupported-type error, got %v", err)
 	}
 }
+
+// --- comprehensive document + round-trip -------------------------------------
+
+// TestComprehensiveDocument loads one TOML document exercising many shapes at
+// once: root dotted keys, nested tables, arrays, an inline table, array-of-
+// tables, mixed scalars, and a datetime (tamed to a string) — asserting each.
+func TestComprehensiveDocument(t *testing.T) {
+	res, err := run(t, `
+load("toml", "decode")
+doc = decode("""
+title = "starpkg"
+count = 42
+ratio = 1.5
+enabled = true
+db.user = "admin"
+db.pass = "secret"
+point = { x = 1, y = 2 }
+
+[server]
+host = "localhost"
+ports = [80, 443]
+
+[server.tls]
+enabled = true
+
+[[items]]
+n = 1
+[[items]]
+n = 2
+
+[meta]
+released = 2026-06-13T10:30:00Z
+""")
+title = doc["title"]
+count = doc["count"]
+ratio = doc["ratio"]
+dbuser = doc["db"]["user"]
+px = doc["point"]["x"]
+port2 = doc["server"]["ports"][1]
+tls = doc["server"]["tls"]["enabled"]
+items = len(doc["items"])
+item2 = doc["items"][1]["n"]
+released_is_str = type(doc["meta"]["released"]) == "string"
+`)
+	if err != nil {
+		t.Fatalf("comprehensive: %v", err)
+	}
+	checks := map[string]interface{}{
+		"title": "starpkg", "count": int64(42), "ratio": 1.5, "dbuser": "admin",
+		"px": int64(1), "port2": int64(443), "tls": true, "items": int64(2),
+		"item2": int64(2), "released_is_str": true,
+	}
+	for k, want := range checks {
+		if res[k] != want {
+			t.Errorf("%s = %v (%T), want %v", k, res[k], res[k], want)
+		}
+	}
+}
+
+// TestRoundTripEquivalence decodes, re-encodes, and decodes again.
+func TestRoundTripEquivalence(t *testing.T) {
+	res, err := run(t, `
+load("toml", "decode", "encode")
+orig = {"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "e": True}
+again = decode(encode(orig))
+same_a = again["a"] == 1
+same_b = again["b"][2] == 3
+same_c = again["c"]["d"] == "x"
+same_e = again["e"] == True
+`)
+	if err != nil {
+		t.Fatalf("round-trip: %v", err)
+	}
+	for _, k := range []string{"same_a", "same_b", "same_c", "same_e"} {
+		if res[k] != true {
+			t.Errorf("round-trip %s = %v, want true", k, res[k])
+		}
+	}
+}
