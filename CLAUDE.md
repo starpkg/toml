@@ -29,7 +29,7 @@ go run github.com/1set/meta/doccov@master .   # doc-coverage gate: every script-
 docker run --rm -v "$PWD":/src -v "$HOME/go/pkg/mod":/go/pkg/mod -w /src golang:1.19 go test -race -count=1 ./...
 ```
 
-Integration scripts under `../test/toml/*.star` live in the **private `starpkg/test` repo** and auto-skip when that directory is absent (e.g. in CI); they are not required for the unit bar.
+There are no external integration fixtures: this module is a self-contained codec, so `toml_test.go` is the whole suite (script-driven through the in-process `run` helper — a `starlet` Machine with the module lazy-loaded). No `../test/toml` directory in the private `starpkg/test` repo is needed or used.
 
 ## Architecture (the part that spans files)
 
