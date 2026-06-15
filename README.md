@@ -2,7 +2,7 @@
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/starpkg/toml.svg)](https://pkg.go.dev/github.com/starpkg/toml)
 [![codecov](https://codecov.io/gh/starpkg/toml/graph/badge.svg)](https://codecov.io/gh/starpkg/toml)
-![binary footprint](https://img.shields.io/badge/binary_footprint-%2B0.2_MB-blue)
+![binary footprint](https://img.shields.io/badge/binary_footprint-%2B0.4_MB-blue)
 
 Decode and encode [TOML](https://toml.io/) from Starlark, built on
 [BurntSushi/toml](https://github.com/BurntSushi/toml).
