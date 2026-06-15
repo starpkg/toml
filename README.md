@@ -9,6 +9,12 @@ Decoding is **hardened**: input size, nesting depth, and total node count are
 bounded; panics become errors; and TOML's native date/time values are surfaced
 as strings.
 
+> **Where this sits.** starpkg modules give Starlark scripts *support for
+> necessary local operations* plus *simple abstractions over common online
+> services*, for ease of use. `toml` is a **local capability**: it is a pure
+> in-process codec — no network, no filesystem, no host services — turning TOML
+> text into Starlark values and back.
+
 ## Installation
 
 ```bash

@@ -7,7 +7,8 @@ package toml
 //   - date/time taming
 //   - encode requires a table
 //   - capwalk limits
-//   - toStarlark value branches (array-of-tables, uint64, Stringer)
+//   - toStarlark value branches (array-of-tables, uint64, Stringer, unsupported)
+//   - comprehensive document + round-trip
 
 import (
 	"strings"
