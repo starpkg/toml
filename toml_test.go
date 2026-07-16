@@ -17,11 +17,13 @@ package toml
 //   - host config levers (caps via env, disabled input cap)
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/1set/starlet"
 	"go.starlark.net/starlark"
+	"go.starlark.net/starlarkstruct"
 )
 
 func run(t *testing.T, script string) (map[string]interface{}, error) {
@@ -668,4 +670,306 @@ func TestInputBytesCapDisabled(t *testing.T) {
 			t.Errorf("expected max_input_bytes error under small cap, got %v", err)
 		}
 	})
+}
+
+// --- parse-DoS hardening (crash guard before the recursive codec) -------------
+
+// TestDecodeManyBracketsRejectedBeforeParse pins the crash guard: input whose
+// bracket-opener count exceeds maxParseBrackets is rejected up front, before
+// gotoml.Decode's recursive parser can be driven deep enough to overflow the
+// stack (a fatal error recover() can't catch). The guard bounds parser recursion
+// soundly (depth <= number of openers) without lexing strings, so it cannot be
+// bypassed by hiding brackets in a crafted quote sequence.
+func TestDecodeManyBracketsRejectedBeforeParse(t *testing.T) {
+	// A run of open brackets well past the limit, but small in bytes and under
+	// the 5 MiB input cap. The parser never sees it.
+	huge := `load("toml", "decode")` + "\n" +
+		`decode("a = " + "[" * 20000)`
+	_, err := run(t, huge)
+	if err == nil || !strings.Contains(err.Error(), "too many nesting brackets") {
+		t.Fatalf("an input over the bracket limit should be rejected before parsing, got %v", err)
+	}
+}
+
+// TestDecodeDeepButUnderBracketLimitHitsMaxDepth confirms a genuinely deep — but
+// under the crash-guard limit — document is parsed safely and then rejected by
+// the real max_depth cap in toStarlark (not the crash guard), with the proper
+// error. This is the normal deep-nesting path.
+func TestDecodeDeepButUnderBracketLimitHitsMaxDepth(t *testing.T) {
+	deep := `load("toml", "decode")` + "\n" +
+		`decode("a = " + "[" * 200 + "]" * 200)` // 200-deep, 400 openers < limit
+	_, err := run(t, deep)
+	if err == nil || !strings.Contains(err.Error(), "nesting exceeds max_depth") {
+		t.Fatalf("a 200-deep document should hit max_depth, got %v", err)
+	}
+}
+
+// TestDecodeBracketsInStringUnderLimitDecodes guards against a false reject:
+// brackets inside a TOML string count toward the (generous) crash-guard limit
+// but are not real nesting, so a string with a modest bracket run decodes fine.
+func TestDecodeBracketsInStringUnderLimitDecodes(t *testing.T) {
+	res, err := run(t, `load("toml", "decode")`+"\n"+
+		`out = decode('s = "' + "[{" * 300 + '"')`+"\n"+ // 600 openers < limit
+		`v = out["s"]`)
+	if err != nil {
+		t.Fatalf("a string with a modest bracket run must decode: %v", err)
+	}
+	if v, _ := res["v"].(string); v != strings.Repeat("[{", 300) {
+		t.Errorf("decoded string value = %q, want the bracket run", res["v"])
+	}
+}
+
+func TestCountBracketOpens(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want int
+	}{
+		{"none", "a = 1", 0},
+		{"one array", "a = [1, 2]", 1},
+		{"nested arrays", "a = [[[1]]]", 3},
+		{"inline tables", "a = {b = {c = 1}}", 2},
+		{"array of tables header", "[[a]]\n[[b]]", 4},
+		// Brackets in strings/comments are counted too (conservative, sound).
+		{"brackets in string counted", `s = "[[[["`, 4},
+		{"brackets in comment counted", "a = 1 # [{[{", 4},
+		{"closers not counted", "a = ]]}}", 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := countBracketOpens(tc.in); got != tc.want {
+				t.Errorf("countBracketOpens(%q) = %d, want %d", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestEncodeDeepRejected pins the encode-side twin: a script that builds a value
+// nested past max_depth is rejected before dataconv.Unmarshal recurses over it
+// (which would overflow the stack — a fatal error, uncatchable). The build runs
+// inside a function because Starlark forbids a top-level for loop.
+func TestEncodeDeepRejected(t *testing.T) {
+	_, err := run(t, `
+load("toml", "encode")
+def deep(n):
+    d = {"x": 1}
+    for i in range(n):
+        d = {"a": d}
+    return d
+encode(deep(200))
+`)
+	if err == nil || !strings.Contains(err.Error(), "nesting exceeds max_depth") {
+		t.Fatalf("deeply-nested encode input should be rejected, got %v", err)
+	}
+}
+
+// TestCheckEncodeDepth exercises the depth walker directly over each container
+// type dataconv.Unmarshal recurses into (dict, list, tuple), confirming it bails
+// at the cap and accepts values within it.
+func TestCheckEncodeDepth(t *testing.T) {
+	// A dict chain 5 deep: {"a":{"a":{"a":{"a":{"x":1}}}}}.
+	dictChain := starlark.Value(starlark.MakeInt(1))
+	for i := 0; i < 5; i++ {
+		d := starlark.NewDict(1)
+		_ = d.SetKey(starlark.String("a"), dictChain)
+		dictChain = d
+	}
+	// A list chain 5 deep: [[[[[1]]]]].
+	listChain := starlark.Value(starlark.MakeInt(1))
+	for i := 0; i < 5; i++ {
+		listChain = starlark.NewList([]starlark.Value{listChain})
+	}
+	// A tuple chain 5 deep: (((((1,),),),),).
+	var tupChain starlark.Value = starlark.MakeInt(1)
+	for i := 0; i < 5; i++ {
+		tupChain = starlark.Tuple{tupChain}
+	}
+
+	for _, tc := range []struct {
+		name string
+		v    starlark.Value
+	}{{"dict", dictChain}, {"list", listChain}, {"tuple", tupChain}} {
+		t.Run(tc.name, func(t *testing.T) {
+			// depth 5 is within a cap of 8.
+			if err := checkEncodeDepth(tc.v, 1, 8); err != nil {
+				t.Errorf("within-cap %s should pass, got %v", tc.name, err)
+			}
+			// depth 5 exceeds a cap of 3.
+			if err := checkEncodeDepth(tc.v, 1, 3); err == nil || !strings.Contains(err.Error(), "max_depth") {
+				t.Errorf("over-cap %s should error, got %v", tc.name, err)
+			}
+		})
+	}
+	// A scalar has no children and always passes.
+	if err := checkEncodeDepth(starlark.String("x"), 1, 1); err != nil {
+		t.Errorf("scalar should pass, got %v", err)
+	}
+}
+
+// TestCheckEncodeDepthContainers covers the remaining recursion branches
+// dataconv.Unmarshal walks — Set, Struct, and Module — that a script's value can
+// legitimately nest through.
+func TestCheckEncodeDepthContainers(t *testing.T) {
+	// A set holding a 5-deep tuple: set -> tuple chain.
+	var tup starlark.Value = starlark.MakeInt(1)
+	for i := 0; i < 5; i++ {
+		tup = starlark.Tuple{tup}
+	}
+	set := starlark.NewSet(1)
+	if err := set.Insert(tup); err != nil {
+		t.Fatalf("set insert: %v", err)
+	}
+	if err := checkEncodeDepth(set, 1, 3); err == nil || !strings.Contains(err.Error(), "max_depth") {
+		t.Errorf("set of a deep tuple should exceed a tight cap, got %v", err)
+	}
+	if err := checkEncodeDepth(set, 1, 20); err != nil {
+		t.Errorf("set within cap should pass, got %v", err)
+	}
+
+	// A struct whose attr is a nested struct (attrChildren + Struct branch).
+	inner := starlarkstruct.FromStringDict(starlarkstruct.Default, starlark.StringDict{"x": starlark.MakeInt(1)})
+	outer := starlarkstruct.FromStringDict(starlarkstruct.Default, starlark.StringDict{"a": inner})
+	if err := checkEncodeDepth(outer, 1, 8); err != nil {
+		t.Errorf("nested struct within cap should pass, got %v", err)
+	}
+	if err := checkEncodeDepth(outer, 1, 1); err == nil || !strings.Contains(err.Error(), "max_depth") {
+		t.Errorf("nested struct should exceed a cap of 1, got %v", err)
+	}
+
+	// A module with a nested member (Module branch of encodeChildren).
+	mod := &starlarkstruct.Module{Name: "m", Members: starlark.StringDict{"a": inner}}
+	if err := checkEncodeDepth(mod, 1, 8); err != nil {
+		t.Errorf("module within cap should pass, got %v", err)
+	}
+	if err := checkEncodeDepth(mod, 1, 1); err == nil || !strings.Contains(err.Error(), "max_depth") {
+		t.Errorf("module should exceed a cap of 1, got %v", err)
+	}
+}
+
+// TestCheckGoDepth covers the reflect-based depth walk over the unmarshaled Go
+// value that bounds gotoml's encoder — including deep values that arrive via a
+// host-wrapped Go value (a slice/map/struct/pointer), which dataconv.Unmarshal
+// extracts opaquely.
+func TestCheckGoDepth(t *testing.T) {
+	// A 10-deep nested slice trips a tight cap and passes a generous one.
+	var deep interface{} = 1
+	for i := 0; i < 10; i++ {
+		deep = []interface{}{deep}
+	}
+	if err := checkGoDepth(reflect.ValueOf(deep), 1, 3); err == nil || !strings.Contains(err.Error(), "max_depth") {
+		t.Errorf("deep slice should exceed cap 3, got %v", err)
+	}
+	if err := checkGoDepth(reflect.ValueOf(deep), 1, 20); err != nil {
+		t.Errorf("deep slice within cap should pass, got %v", err)
+	}
+	// A nested map.
+	nm := map[string]interface{}{"a": map[string]interface{}{"b": 1}}
+	if err := checkGoDepth(reflect.ValueOf(nm), 1, 1); err == nil || !strings.Contains(err.Error(), "max_depth") {
+		t.Errorf("nested map should exceed cap 1, got %v", err)
+	}
+	// A struct with a nested (and a hidden/tagged) field — pointers are followed.
+	type inner struct{ X int }
+	type outer struct {
+		A inner
+		B inner `toml:"-"` // exported; the encoder still sees it, so we walk it
+	}
+	if err := checkGoDepth(reflect.ValueOf(&outer{}), 1, 8); err != nil {
+		t.Errorf("nested struct within cap should pass, got %v", err)
+	}
+	if err := checkGoDepth(reflect.ValueOf(outer{}), 1, 1); err == nil || !strings.Contains(err.Error(), "max_depth") {
+		t.Errorf("nested struct should exceed cap 1, got %v", err)
+	}
+	// A nil pointer and a scalar have no children.
+	if err := checkGoDepth(reflect.ValueOf((*int)(nil)), 1, 1); err != nil {
+		t.Errorf("nil pointer should pass, got %v", err)
+	}
+	if err := checkGoDepth(reflect.ValueOf(42), 1, 1); err != nil {
+		t.Errorf("scalar should pass, got %v", err)
+	}
+}
+
+// TestEncodeDeepTupleKeyRejected guards a script-reachable encode crash: a dict
+// whose KEY is a deeply-nested tuple (dataconv stringifies/hashes it recursively)
+// must trip the depth cap — checkEncodeDepth walks keys, not just values.
+func TestEncodeDeepTupleKeyRejected(t *testing.T) {
+	var key starlark.Value = starlark.MakeInt(1)
+	for i := 0; i < 10; i++ {
+		key = starlark.Tuple{key} // a 10-deep, hashable tuple key
+	}
+	d := starlark.NewDict(1)
+	if err := d.SetKey(key, starlark.MakeInt(1)); err != nil {
+		t.Fatalf("set key: %v", err)
+	}
+	if err := checkEncodeDepth(d, 1, 3); err == nil || !strings.Contains(err.Error(), "max_depth") {
+		t.Errorf("a deep tuple key should exceed a tight cap, got %v", err)
+	}
+	if err := checkEncodeDepth(d, 1, 20); err != nil {
+		t.Errorf("a shallow-enough key should pass, got %v", err)
+	}
+}
+
+// TestEffectiveEncodeDepth pins the absolute crash-guard ceiling: a disabled
+// (<=0) or enormous host max_depth is clamped to maxEncodeDepth so the guard is
+// always on and its own walk is always bounded; an in-range value is honored.
+func TestEffectiveEncodeDepth(t *testing.T) {
+	cases := []struct{ in, want int }{
+		{0, maxEncodeDepth},
+		{-1, maxEncodeDepth},
+		{64, 64},
+		{maxEncodeDepth, maxEncodeDepth},
+		{maxEncodeDepth + 1, maxEncodeDepth},
+		{1 << 30, maxEncodeDepth},
+	}
+	for _, tc := range cases {
+		if got := effectiveEncodeDepth(tc.in); got != tc.want {
+			t.Errorf("effectiveEncodeDepth(%d) = %d, want %d", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestEncodeCrashGuardActiveWhenMaxDepthDisabled confirms the encode crash guard
+// runs even when the host disables max_depth (0) — the fixed absolute ceiling
+// still applies, so a script can't disable it by zeroing max_depth.
+func TestEncodeCrashGuardActiveWhenMaxDepthDisabled(t *testing.T) {
+	t.Setenv("TOML_MAX_DEPTH", "0")
+	// A within-absolute-ceiling document still encodes (guard doesn't false-trip).
+	if _, err := run(t, `load("toml","encode"); encode({"a": {"b": 1}})`); err != nil {
+		t.Errorf("shallow encode under disabled max_depth should pass: %v", err)
+	}
+	// And the module still constructs the guard against the absolute ceiling.
+	if got := effectiveEncodeDepth(0); got != maxEncodeDepth {
+		t.Errorf("disabled max_depth should clamp to %d, got %d", maxEncodeDepth, got)
+	}
+}
+
+// TestEncodeDepthBoundaryOK confirms the encode cap rejects only what is beyond
+// it: a document nested within max_depth still encodes.
+func TestEncodeDepthBoundaryOK(t *testing.T) {
+	res, err := run(t, `
+load("toml", "encode")
+d = {"a": {"b": {"c": 1}}}
+out = encode(d)
+ok = len(out) > 0
+`)
+	if err != nil {
+		t.Fatalf("a shallow document should encode: %v", err)
+	}
+	if res["ok"] != true {
+		t.Errorf("encode produced no output")
+	}
+}
+
+// TestCapsAreHostOnly is the capability-gate guard: max_depth / max_nodes /
+// max_input_bytes are DoS limits the module enforces against untrusted scripts,
+// so a script must not be able to raise them. base emits get_<name> (not secret)
+// but NO set_<name> for a host-only option.
+func TestCapsAreHostOnly(t *testing.T) {
+	for _, key := range []string{"max_depth", "max_nodes", "max_input_bytes"} {
+		if _, err := run(t, `load("toml", "set_`+key+`")`); err == nil {
+			t.Errorf("set_%s is loadable — a script can raise the cap", key)
+		}
+		if _, err := run(t, `load("toml", "get_`+key+`")`); err != nil {
+			t.Errorf("get_%s should be loadable (the cap is not secret): %v", key, err)
+		}
+	}
 }

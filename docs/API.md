@@ -113,14 +113,24 @@ hardened:
 
 - **Date/time are strings.** TOML datetimes/dates/times are surfaced as strings
   (RFC 3339 for full timestamps), never surprise opaque values.
-- **Bounded decode (capwalk).** Rejects input over `max_input_bytes`, nesting
-  deeper than `max_depth`, or more than `max_nodes` total nodes.
-- **No host panics.** `decode` and `encode` recover panics into errors.
+- **Crash-safe against deep nesting.** A deeply nested document overflows the
+  goroutine stack — a Go *fatal error* that `recover()` cannot catch. Before the
+  recursive codec runs, `decode` caps the number of `[`/`{` openers in the text
+  (parser recursion can never exceed that count, so this is a sound bound that
+  needs no string-lexing and cannot be bypassed by hiding brackets in a crafted
+  string), and `encode` walks the value's depth. The exact `max_depth` is then
+  enforced on the parsed data.
+- **Bounded decode (capwalk).** `decode` rejects input over `max_input_bytes`,
+  nesting past `max_depth` (on the parsed tree), or more than `max_nodes` total
+  nodes.
+- **No host panics.** `decode` and `encode` recover ordinary panics into errors
+  (and pre-reject the depth that would otherwise be an uncatchable fatal crash).
 - **Deterministic order.** Table keys are emitted in sorted order.
 
 The caps default to generous values (`max_depth=64`, `max_nodes=100000`,
-`max_input_bytes=5 MiB`) chosen so ordinary documents are unaffected; tune them
-through the [configuration accessors](#configuration) below.
+`max_input_bytes=5 MiB`) chosen so ordinary documents are unaffected. They are
+**host-only** — a script cannot widen them; tune them host-side through the
+[`TOML_*` environment variables](#configuration) below.
 
 ## Notes
 
@@ -131,25 +141,26 @@ and compose the resulting dicts in your Starlark script.
 
 ## Configuration
 
-Each module configuration option is exposed to scripts as a pair of generated
-accessor builtins (loaded from the `toml` module alongside the functions above):
+These three options are DoS/resource limits the module enforces against
+untrusted script input, so they are **host-only**: each exposes a read-only
+`get_<key>()` builtin but **no `set_<key>`**, and its environment value is
+snapshotted at construction so it cannot be re-widened at runtime. A script can
+read a cap but cannot raise it. Configure them host-side via the `TOML_*`
+environment variables.
 
-- **`get_<key>()`** — returns the current value of the option.
-- **`set_<key>(value)`** — sets the option (returns `None`).
+Because they are host-only, the setters `set_max_depth`, `set_max_nodes`, and
+`set_max_input_bytes` are **not generated** — a script cannot call them; only the
+`get_<key>` readers exist.
 
-An option's value resolves in priority order: an explicit `set_<key>` value, the
-environment variable, then the default. These options bound the `decode` path
-(`encode` has no caps).
-
-None of the `toml` options are secret, so every option exposes **both**
-`get_<key>` and `set_<key>`. (A secret option would expose only its `set_<key>`
-accessor — never a getter — but this module has none.)
+An option's value resolves in priority order: the (snapshotted) environment
+variable, then the default. `max_depth` bounds both `decode` and `encode`;
+`max_nodes` and `max_input_bytes` bound `decode`.
 
 | Option | Getter | Setter | Type | Env var | Default | Description |
 |--------|--------|--------|------|---------|---------|-------------|
-| `max_depth` | `get_max_depth` | `set_max_depth` | int | `TOML_MAX_DEPTH` | `64` | Maximum nesting depth when decoding |
-| `max_nodes` | `get_max_nodes` | `set_max_nodes` | int | `TOML_MAX_NODES` | `100000` | Maximum total nodes when decoding |
-| `max_input_bytes` | `get_max_input_bytes` | `set_max_input_bytes` | int | `TOML_MAX_INPUT_BYTES` | `5242880` | Maximum input size in bytes when decoding (5 MiB) |
+| `max_depth` | `get_max_depth` | _(host-only, none)_ | int | `TOML_MAX_DEPTH` | `64` | Maximum nesting depth when decoding or encoding |
+| `max_nodes` | `get_max_nodes` | _(host-only, none)_ | int | `TOML_MAX_NODES` | `100000` | Maximum total nodes when decoding |
+| `max_input_bytes` | `get_max_input_bytes` | _(host-only, none)_ | int | `TOML_MAX_INPUT_BYTES` | `5242880` | Maximum input size in bytes when decoding (5 MiB) |
 
 **Example:**
 
@@ -157,14 +168,11 @@ accessor — never a getter — but this module has none.)
 load(
     "toml",
     "decode",
-    # getters
+    # getters only — the caps are host-only, so there is no set_<key>
     "get_max_depth", "get_max_nodes", "get_max_input_bytes",
-    # setters
-    "set_max_depth", "set_max_nodes", "set_max_input_bytes",
 )
 
-set_max_depth(16)
-print(get_max_depth())  # 16
+print(get_max_depth())  # 64 (read-only from a script; set TOML_MAX_DEPTH host-side)
 
-decode("a = 1")  # decoded under the tightened cap
+decode("a = 1")
 ```

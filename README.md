@@ -7,9 +7,11 @@
 Decode and encode [TOML](https://toml.io/) from Starlark, built on
 [BurntSushi/toml](https://github.com/BurntSushi/toml).
 
-Decoding is **hardened**: input size, nesting depth, and total node count are
-bounded; panics become errors; and TOML's native date/time values are surfaced
-as strings.
+Both directions are **hardened**: nesting depth is bounded *before* the recursive
+codec runs (a deeply nested document would otherwise overflow the stack — a fatal
+error `recover()` cannot catch); decode also bounds input size and node count;
+the caps are host-only (a script cannot widen them); panics become errors; and
+TOML's native date/time values are surfaced as strings.
 
 ## Overview
 
@@ -21,9 +23,10 @@ filesystem, no host services — turning TOML text into Starlark values and back
 - **`decode(text)`** — parse a TOML document (string or bytes) into Starlark
   values (a `dict`).
 - **`encode(value)`** — serialize a `dict` to TOML text.
-- **Hardened decode** — bounded input size, nesting depth, and node count;
-  panics recovered into errors; date/time surfaced as strings; deterministic
-  key order.
+- **Hardened both ways** — nesting depth bounded before the recursive codec runs
+  (decode caps the text's bracket-opener count; encode walks the value), plus bounded input
+  size and node count on decode; host-only caps; panics recovered into errors;
+  date/time surfaced as strings; deterministic key order.
 
 For the complete per-builtin reference — signatures, parameters, returns,
 errors, examples — and the configuration accessors, see
@@ -67,9 +70,11 @@ return values, errors, and examples of both builtins.
 
 ## Configuration
 
-The module's `decode` caps (`max_depth`, `max_nodes`, `max_input_bytes`) are
-configured via environment variables (`TOML_*`) or per-option `get_<key>` /
-`set_<key>` accessor builtins. See the
+The codec caps (`max_depth`, used by both decode and encode; `max_nodes` and
+`max_input_bytes`, used by decode) are **host-only** — they are DoS limits the
+module enforces against untrusted scripts, so each has a read-only `get_<key>`
+but **no `set_<key>`**, and a script cannot raise it. Configure them host-side via
+the `TOML_*` environment variables. See the
 [Configuration section of docs/API.md](docs/API.md#configuration) for the full
 option table, defaults, and accessors.
 
