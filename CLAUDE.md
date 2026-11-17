@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`starpkg/toml` is an **L4 domain module** of the Star\* ecosystem: it exposes TOML decoding and encoding to Starlark scripts. A script imports the module, calls `decode(text)` to turn a TOML document into Starlark values (a dict), or `encode(value)` to serialize a dict back into TOML text.
+`starpkg/toml` is an **L3 domain module** of the Star\* ecosystem: it exposes TOML decoding and encoding to Starlark scripts. A script imports the module, calls `decode(text)` to turn a TOML document into Starlark values (a dict), or `encode(value)` to serialize a dict back into TOML text.
 
 starpkg modules give scripts *support for necessary local operations* plus *simple abstractions over common online services*, for ease of use. `toml` is squarely on the **local** side: it is a pure in-process codec — **no network, no filesystem, no host services**. Input is a string, output is a string or Starlark values; nothing leaves the process. (Contrast with siblings like `sqlite`/`s3`/`email`, which front an online service.)
 
@@ -69,6 +69,6 @@ Three layers must stay in sync (enforced by the doc standard, `plan/starpkg文�
 ## Release discipline
 
 - **Floor = go 1.19** (this repo's `go.mod`); the floor only rises in this repo's own pin PR.
-- **CI matrix** = `[1.19.x, 1.25.x]` via the centralized reusable workflow in `1set/meta` (`go-ci.yml`, pinned to a commit SHA). Bumping the pin happens when meta's workflow changes.
+- **CI matrix** = `[1.19.x, 1.27.x]` via the centralized reusable workflow in `1set/meta` (`go-ci.yml`, pinned to a commit SHA). Bumping the pin happens when meta's workflow changes.
 - **Pin upgrade is a separate, last PR.** Upgrading the `go.starlark.net` pin / 1set deps / go floor is one isolated PR done *after* feature/bug work — don't fold it into a docs or feature change, and don't tag a release before it merges.
 - **Bumping the version, the go floor, or tagging are user-confirmed actions** — never tag autonomously; draft title + notes and get explicit approval first; default to patch bumps; a published tag is immutable in the Go module proxy.
